@@ -1,203 +1,439 @@
-import asyncio, os, random, secrets, string
-from datetime import datetime, timezone
-import aiosqlite
-from aiogram import Bot, Dispatcher, F
+import os
+import sqlite3
+import random
+import string
+import asyncio
+
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import Message
 
 TOKEN = os.getenv("BOT_TOKEN")
-DB = os.getenv("DATABASE_PATH", "/app/detective.db")
 if not TOKEN:
     raise RuntimeError("Set BOT_TOKEN environment variable")
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-CASES = [
- {"title":"Дело №014: Последний поезд","intro":"В 23:40 из закрытого вагона исчезла папка с секретными документами. В вагоне были проводник, журналист и инженер.","clues":[("Билет","На полу билет, проколотый компостером в 22:55 — после отправления поезда."),("Окно","На защёлке окна свежая царапина, хотя окно якобы не открывали."),("Журнал","Инженер сказал, что чинил свет, но журнал показывает: электричество не отключалось.")],"suspects":["Проводник","Журналист","Инженер"],"answer":2,"explain":"Инженер солгал о ремонте света и воспользовался техническим люком."},
- {"title":"Дело №027: Часы без времени","intro":"Из кабинета коллекционера пропали старинные часы. Сигнализация не сработала. В комнате нашли мокрый след и записку с цифрой 17.","clues":[("След","След ведёт от окна к сейфу, но возле окна пол совершенно сухой."),("Записка","Цифра 17 написана зеркально."),("Механизм","Смотритель знал, что механизм часов сняли накануне.")],"suspects":["Коллекционер","Смотритель","Гость"],"answer":1,"explain":"Смотритель знал о снятом механизме и инсценировал остановку часов."}
-]
-PUZZLES=[("Чем больше из неё берут, тем больше она становится?","яма"),("Я всегда впереди тебя, но увидеть меня нельзя. Что это?","будущее"),("Что можно сломать, даже не прикасаясь?","обещание")]
-MISSIONS=["Придумай алиби для вымышленного подозреваемого за 60 секунд.","Зашифруй фразу сдвигом букв на 3 позиции.","Задай напарнику вопрос, на который нельзя ответить «да» или «нет».","Найди сегодня три детали вокруг, которые обычно не замечаешь."]
-ANSWERS={}
+DB = "detective_v2.db"
 
-async def init_db():
- async with aiosqlite.connect(DB) as db:
-  await db.executescript("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,xp INTEGER DEFAULT 0);
-  CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,owner INTEGER,case_idx INTEGER DEFAULT 0,clues TEXT DEFAULT '',status TEXT DEFAULT 'open');
-  CREATE TABLE IF NOT EXISTS members(room TEXT,user_id INTEGER,UNIQUE(room,user_id));""")
-  await db.commit()
+CASES = {
+    "museum": {
+        "title": "Тайна ночного музея",
+        "victim": "Директор музея",
+        "culprit": "охранник",
+        "suspects": ["охранник", "куратор", "уборщица"],
+        "clues": [
+            "Камеры отключились ровно в 23:40.",
+            "На полу найдена грязь с обуви охранника.",
+            "В журнале охраны есть исправленная запись.",
+            "Куратор утверждает, что был дома, но его машина стояла у музея."
+        ],
+        "interrogations": {
+            "охранник": "Я ничего не видел. Хотя странно, что вы спрашиваете именно меня...",
+            "куратор": "Я ушёл раньше. Проверьте записи, если не верите.",
+            "уборщица": "Я слышала шаги возле зала, но никого не видела."
+        }
+    },
+    "hotel": {
+        "title": "Последний номер",
+        "victim": "Постоялец номера 307",
+        "culprit": "администратор",
+        "suspects": ["администратор", "повар", "портье"],
+        "clues": [
+            "Ключ от номера был использован после полуночи.",
+            "Портье видел администратора на третьем этаже.",
+            "В журнале заселения есть подозрительная запись.",
+            "Администратор соврал о своём местонахождении."
+        ],
+        "interrogations": {
+            "администратор": "Я всю ночь был за стойкой. Других подробностей не будет.",
+            "повар": "Я закончил смену до полуночи.",
+            "портье": "Я видел человека возле номера 307."
+        }
+    },
+    "train": {
+        "title": "Убийство в экспрессе",
+        "victim": "Пассажир первого вагона",
+        "culprit": "проводник",
+        "suspects": ["проводник", "пассажир", "начальник поезда"],
+        "clues": [
+            "Поезд не делал остановок в течение ночи.",
+            "Купе открывали служебным ключом.",
+            "На столе обнаружен билет проводника.",
+            "Проводник сообщил неверное время обхода."
+        ],
+        "interrogations": {
+            "проводник": "Я обходил вагоны. Ничего необычного.",
+            "пассажир": "Я почти всю ночь спал.",
+            "начальник поезда": "Я отвечаю за весь состав, но в купе не заходил."
+        }
+    },
+    "island": {
+        "title": "Тень на острове",
+        "victim": "Владелец виллы",
+        "culprit": "садовник",
+        "suspects": ["садовник", "повар", "гость"],
+        "clues": [
+            "На берегу найдены свежие следы.",
+            "Дверь виллы открывали изнутри.",
+            "На одежде садовника обнаружена земля из теплицы.",
+            "Садовник знал о тайном выходе."
+        ],
+        "interrogations": {
+            "садовник": "Я весь вечер ухаживал за растениями.",
+            "повар": "Я готовил ужин и никуда не уходил.",
+            "гость": "Я приехал только накануне."
+        }
+    },
+    "bank": {
+        "title": "Ограбление века",
+        "victim": "Банковское хранилище",
+        "culprit": "кассир",
+        "suspects": ["кассир", "директор", "инкассатор"],
+        "clues": [
+            "Сигнализация была отключена изнутри.",
+            "Код доступа вводили вручную.",
+            "Время отключения совпадает со сменой кассира.",
+            "Кассир пытался скрыть свой график."
+        ],
+        "interrogations": {
+            "кассир": "Я просто выполнял свою работу.",
+            "директор": "У меня есть алиби. Проверяйте.",
+            "инкассатор": "Я приехал по расписанию."
+        }
+    }
+}
 
-async def ensure_user(u):
- async with aiosqlite.connect(DB) as db:
-  await db.execute("INSERT OR IGNORE INTO users(id,name) VALUES(?,?)",(u.id,u.full_name))
-  await db.execute("UPDATE users SET name=? WHERE id=?",(u.full_name,u.id)); await db.commit()
 
-async def get_room(uid):
- async with aiosqlite.connect(DB) as db:
-  cur=await db.execute("SELECT room FROM members WHERE user_id=?",(uid,)); r=await cur.fetchone()
-  return r[0] if r else None
+def db():
+    return sqlite3.connect(DB)
 
-async def room_members(code):
- async with aiosqlite.connect(DB) as db:
-  cur=await db.execute("SELECT user_id FROM members WHERE room=?",(code,))
-  return [x[0] for x in await cur.fetchall()]
 
-def menu():
- b=InlineKeyboardBuilder()
- for label,data in [("🕵️ Создать комнату","create"),("🔐 Ввести код","join"),("📁 Начать расследование","case"),("🧩 Загадка","puzzle"),("🎯 Тайное задание","mission"),("🏆 Мой профиль","profile")]:
-  b.button(text=label,callback_data=data)
- b.adjust(1); return b.as_markup()
+def init_db():
+    con = db()
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE,
+            case_key TEXT,
+            clue_index INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active'
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS members (
+            room_id INTEGER,
+            user_id INTEGER,
+            chat_id INTEGER,
+            username TEXT,
+            xp INTEGER DEFAULT 0,
+            UNIQUE(room_id, user_id)
+        )
+    """)
+    con.commit()
+    con.close()
+
+
+def active_room(user_id):
+    con = db()
+    result = con.execute("""
+        SELECT r.id, r.code, r.case_key, r.clue_index
+        FROM rooms r
+        JOIN members m ON m.room_id = r.id
+        WHERE m.user_id = ? AND r.status = 'active'
+        ORDER BY r.id DESC LIMIT 1
+    """, (user_id,)).fetchone()
+    con.close()
+    return result
+
+
+def add_xp(user_id, room_id, amount):
+    con = db()
+    con.execute(
+        "UPDATE members SET xp = xp + ? WHERE user_id = ? AND room_id = ?",
+        (amount, user_id, room_id)
+    )
+    con.commit()
+    con.close()
+
 
 @dp.message(CommandStart())
-async def start(m:Message):
- await ensure_user(m.from_user)
- await m.answer(f"🕵️ <b>ДЕТЕКТИВ — секретное агентство</b>\\nПривет, {m.from_user.first_name}! Создай комнату и пригласи друга. Общение — через /say текст.",reply_markup=menu(),parse_mode="HTML")
+async def start(message: Message):
+    await message.answer(
+        "🕵️ **ДЕТЕКТИВ**\n\n"
+        "Добро пожаловать в мир расследований!\n\n"
+        "Команды:\n"
+        "/new — создать расследование\n"
+        "/join КОД — присоединиться к другу\n"
+        "/cases — список расследований\n"
+        "/clue — получить улику\n"
+        "/suspects — подозреваемые\n"
+        "/interrogate имя — допросить подозреваемого\n"
+        "/accuse имя — обвинить преступника\n"
+        "/say текст — написать напарнику\n"
+        "/level — твой уровень\n"
+        "/rules — правила игры",
+        parse_mode="Markdown"
+    )
 
-@dp.callback_query(F.data=="create")
-async def create(c:CallbackQuery):
- await ensure_user(c.from_user)
- if await get_room(c.from_user.id):
-  await c.message.answer("Ты уже в комнате. Для выхода используй /leave.")
- else:
-  code=''.join(random.choices(string.ascii_uppercase+string.digits,k=6))
-  async with aiosqlite.connect(DB) as db:
-   await db.execute("INSERT INTO rooms(code,owner) VALUES(?,?)",(code,c.from_user.id))
-   await db.execute("INSERT INTO members(room,user_id) VALUES(?,?)",(code,c.from_user.id)); await db.commit()
-  await c.message.answer(f"Комната создана! Отправь другу код: <code>{code}</code>",parse_mode="HTML")
- await c.answer()
 
-@dp.callback_query(F.data=="join")
-async def join_hint(c:CallbackQuery):
- await c.message.answer("Введи команду: /join ABC123 — подставь код комнаты друга.")
- await c.answer()
+@dp.message(Command("new"))
+async def new_game(message: Message):
+    case_key = random.choice(list(CASES.keys()))
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+    con = db()
+    cur = con.execute(
+        "INSERT INTO rooms (code, case_key) VALUES (?, ?)",
+        (code, case_key)
+    )
+    room_id = cur.lastrowid
+    con.execute(
+        "INSERT INTO members (room_id, user_id, chat_id, username) VALUES (?, ?, ?, ?)",
+        (room_id, message.from_user.id, message.chat.id,
+         message.from_user.username or message.from_user.first_name)
+    )
+    con.commit()
+    con.close()
+
+    case = CASES[case_key]
+    await message.answer(
+        f"🔎 **Расследование началось!**\n\n"
+        f"Дело: {case['title']}\n"
+        f"Потерпевший: {case['victim']}\n\n"
+        f"Код комнаты: `{code}`\n"
+        f"Отправь другу: `/join {code}`\n\n"
+        "Когда будете готовы, используйте /clue.",
+        parse_mode="Markdown"
+    )
+
 
 @dp.message(Command("join"))
-async def join(m:Message):
- await ensure_user(m.from_user)
- p=m.text.split(maxsplit=1)
- if len(p)<2: return await m.answer("Формат: /join ABC123")
- if await get_room(m.from_user.id): return await m.answer("Сначала выйди из текущей комнаты: /leave")
- code=p[1].strip().upper()
- async with aiosqlite.connect(DB) as db:
-  cur=await db.execute("SELECT COUNT(*) FROM members WHERE room=? AND user_id IN (SELECT owner FROM rooms WHERE code=?)",(code,code))
-  exists=await db.execute("SELECT 1 FROM rooms WHERE code=? AND status='open'",(code,))
-  if not await exists.fetchone(): return await m.answer("Комната не найдена.")
-  cur=await db.execute("SELECT COUNT(*) FROM members WHERE room=?",(code,))
-  if (await cur.fetchone())[0]>=2: return await m.answer("Комната уже заполнена.")
-  await db.execute("INSERT INTO members(room,user_id) VALUES(?,?)",(code,m.from_user.id)); await db.commit()
- await m.answer(f"Ты в комнате {code}! Пиши другу через /say текст.")
- for uid in await room_members(code):
-  if uid!=m.from_user.id:
-   try: await m.bot.send_message(uid,f"🟢 {m.from_user.full_name} присоединился к комнате.")
-   except Exception: pass
+async def join_game(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Укажи код: /join ABC123")
+        return
 
-@dp.message(Command("leave"))
-async def leave(m:Message):
- code=await get_room(m.from_user.id)
- if not code: return await m.answer("Ты не в комнате.")
- async with aiosqlite.connect(DB) as db:
-  await db.execute("DELETE FROM members WHERE room=? AND user_id=?",(code,m.from_user.id)); await db.commit()
- await m.answer("Ты вышел из комнаты.")
+    code = args[1].strip().upper()
+    con = db()
+    room = con.execute(
+        "SELECT id FROM rooms WHERE code = ? AND status = 'active'",
+        (code,)
+    ).fetchone()
 
-@dp.message(Command("say"))
-async def say(m:Message):
- code=await get_room(m.from_user.id)
- if not code: return await m.answer("Сначала создай комнату или войди: /join КОД")
- body=m.text.partition(" ")[2].strip()
- if not body: return await m.answer("Пример: /say Привет, напарник!")
- for uid in await room_members(code):
-  if uid!=m.from_user.id:
-   try: await m.bot.send_message(uid,f"💬 <b>{m.from_user.full_name}</b>:\\n{body}",parse_mode="HTML")
-   except Exception: pass
- await m.answer("Сообщение отправлено напарнику.")
+    if not room:
+        con.close()
+        await message.answer("Комната не найдена.")
+        return
 
-async def begin_case(m,bot,user_id):
- code=await get_room(user_id)
- if not code: return await m.answer("Сначала создай комнату и пригласи друга.")
- async with aiosqlite.connect(DB) as db:
-  await db.execute("UPDATE rooms SET case_idx=0,clues='' WHERE code=?",(code,)); await db.commit()
- case=CASES[0]; msg=f"📁 <b>{case['title']}</b>\\n{case['intro']}\\n\\nОткрывайте улики: /clue"
- for uid in await room_members(code):
-  try: await bot.send_message(uid,msg,parse_mode="HTML")
-  except Exception: pass
+    room_id = room[0]
+    count = con.execute(
+        "SELECT COUNT(*) FROM members WHERE room_id = ?",
+        (room_id,)
+    ).fetchone()[0]
 
-@dp.callback_query(F.data=="case")
-async def case_button(c:CallbackQuery):
- await begin_case(c.message,c.bot,c.from_user.id); await c.answer()
+    if count >= 2:
+        con.close()
+        await message.answer("В этой комнате уже два сыщика.")
+        return
 
-@dp.message(Command("case"))
-async def case_command(m:Message):
- await begin_case(m,m.bot,m.from_user.id)
+    con.execute(
+        "INSERT OR IGNORE INTO members (room_id, user_id, chat_id, username) VALUES (?, ?, ?, ?)",
+        (room_id, message.from_user.id, message.chat.id,
+         message.from_user.username or message.from_user.first_name)
+    )
+    con.commit()
+    con.close()
+
+    await message.answer("🤝 Ты присоединился к расследованию! Используй /clue.")
+
+
+@dp.message(Command("cases"))
+async def cases(message: Message):
+    text = "📚 **Доступные расследования:**\n\n"
+    for case in CASES.values():
+        text += f"🔎 {case['title']}\n"
+    await message.answer(text, parse_mode="Markdown")
+
 
 @dp.message(Command("clue"))
-async def clue(m:Message):
- code=await get_room(m.from_user.id)
- if not code: return await m.answer("Сначала войди в комнату.")
- async with aiosqlite.connect(DB) as db:
-  cur=await db.execute("SELECT case_idx,clues FROM rooms WHERE code=?",(code,)); row=await cur.fetchone()
-  if not row: return
-  idx,seen=row; case=CASES[idx]; used=[int(x) for x in seen.split(",") if x]
-  nxt=next((i for i in range(len(case["clues"])) if i not in used),None)
-  if nxt is None: return await m.answer("Улики закончились. Обсудите версию и используйте /accuse 1, 2 или 3.")
-  used.append(nxt); await db.execute("UPDATE rooms SET clues=? WHERE code=?",(",".join(map(str,used)),code)); await db.commit()
- label,detail=case["clues"][nxt]
- for uid in await room_members(code):
-  try: await m.bot.send_message(uid,f"🔎 <b>{label}</b>\\n{detail}",parse_mode="HTML")
-  except Exception: pass
+async def clue(message: Message):
+    room = active_room(message.from_user.id)
+    if not room:
+        await message.answer("Сначала создай дело: /new")
+        return
+
+    room_id, code, case_key, index = room
+    clues = CASES[case_key]["clues"]
+
+    if index >= len(clues):
+        await message.answer("Все улики уже найдены. Пора сопоставлять факты!")
+        return
+
+    await message.answer(
+        f"🧩 **Улика №{index + 1}**\n\n{clues[index]}"
+    )
+
+    con = db()
+    con.execute(
+        "UPDATE rooms SET clue_index = clue_index + 1 WHERE id = ?",
+        (room_id,)
+    )
+    con.commit()
+    con.close()
+    add_xp(message.from_user.id, room_id, 10)
+
+
+@dp.message(Command("suspects"))
+async def suspects(message: Message):
+    room = active_room(message.from_user.id)
+    if not room:
+        await message.answer("Сначала создай дело: /new")
+        return
+
+    case = CASES[room[2]]
+    text = "🕵️ **Подозреваемые:**\n\n"
+    text += "\n".join("• " + name for name in case["suspects"])
+    text += "\n\nДля допроса: `/interrogate имя`"
+    await message.answer(text, parse_mode="Markdown")
+
+
+@dp.message(Command("interrogate"))
+async def interrogate(message: Message):
+    room = active_room(message.from_user.id)
+    if not room:
+        await message.answer("Сначала создай дело: /new")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Напиши имя: /interrogate охранник")
+        return
+
+    name = args[1].strip().lower()
+    case = CASES[room[2]]
+    answers = case["interrogations"]
+
+    if name not in answers:
+        await message.answer("Такого подозреваемого нет. Используй /suspects.")
+        return
+
+    await message.answer(
+        f"🎙 **Допрос: {name}**\n\n{answers[name]}"
+    )
+    add_xp(message.from_user.id, room[0], 5)
+
 
 @dp.message(Command("accuse"))
-async def accuse(m:Message):
- code=await get_room(m.from_user.id)
- if not code: return await m.answer("Сначала войди в комнату.")
- p=m.text.split()
- if len(p)!=2 or p[1] not in ("1","2","3"): return await m.answer("Формат: /accuse 1 (или 2, 3)")
- case=CASES[0]; choice=int(p[1])-1
- if choice==case["answer"]:
-  async with aiosqlite.connect(DB) as db:
-   await db.execute("UPDATE users SET xp=xp+100 WHERE id IN (SELECT user_id FROM members WHERE room=?)",(code,)); await db.commit()
-  result=f"✅ Верно! Виновен: {case['suspects'][case['answer']]}.\\n{case['explain']}\\n+100 XP каждому."
- else: result=f"❌ Не угадали: {case['suspects'][choice]}. Соберите больше улик и попробуйте снова."
- for uid in await room_members(code):
-  try: await m.bot.send_message(uid,result)
-  except Exception: pass
+async def accuse(message: Message):
+    room = active_room(message.from_user.id)
+    if not room:
+        await message.answer("Сначала создай дело: /new")
+        return
 
-@dp.callback_query(F.data=="puzzle")
-@dp.message(Command("puzzle"))
-async def puzzle(e):
- m=e.message if isinstance(e,CallbackQuery) else e
- q,a=random.choice(PUZZLES); ANSWERS[m.chat.id]=a
- await m.answer(f"🧩 <b>Загадка</b>\\n{q}\\nОтвет отправь командой /answer текст",parse_mode="HTML")
- if isinstance(e,CallbackQuery): await e.answer()
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Напиши имя подозреваемого: /accuse охранник")
+        return
 
-@dp.message(Command("answer"))
-async def answer(m:Message):
- expected=ANSWERS.get(m.chat.id); guess=m.text.partition(" ")[2].strip().lower()
- if not expected: return await m.answer("Сначала запусти /puzzle")
- if guess==expected:
-  await ensure_user(m.from_user)
-  async with aiosqlite.connect(DB) as db:
-   await db.execute("UPDATE users SET xp=xp+25 WHERE id=?",(m.from_user.id,)); await db.commit()
-  ANSWERS.pop(m.chat.id,None); await m.answer("🎉 Верно! +25 XP.")
- else: await m.answer("Пока неверно. Попробуй ещё.")
+    name = args[1].strip().lower()
+    case = CASES[room[2]]
 
-@dp.callback_query(F.data=="mission")
-async def mission(c:CallbackQuery):
- await c.message.answer("🎯 <b>Тайное задание</b>\\n"+random.choice(MISSIONS),parse_mode="HTML"); await c.answer()
+    if name == case["culprit"]:
+        await message.answer(
+            f"🎉 **ДЕЛО РАСКРЫТО!**\n\n"
+            f"Преступник: {case['culprit']}.\n"
+            "Отличная работа, детектив!",
+            parse_mode="Markdown"
+        )
+        con = db()
+        con.execute(
+            "UPDATE rooms SET status = 'finished' WHERE id = ?",
+            (room[0],)
+        )
+        con.commit()
+        con.close()
+        add_xp(message.from_user.id, room[0], 100)
+    else:
+        await message.answer(
+            "❌ Неверное обвинение. Не торопись, проверь улики ещё раз."
+        )
 
-@dp.callback_query(F.data=="profile")
-async def profile(c:CallbackQuery):
- await ensure_user(c.from_user)
- async with aiosqlite.connect(DB) as db:
-  cur=await db.execute("SELECT xp FROM users WHERE id=?",(c.from_user.id,)); xp=(await cur.fetchone())[0]
- await c.message.answer(f"🪪 <b>Досье агента</b>\\nОпыт: {xp} XP\\nУровень: {1+xp//100}",parse_mode="HTML"); await c.answer()
 
-@dp.message()
-async def fallback(m:Message):
- await m.answer("Команды: /case /clue /accuse 1 /puzzle /answer текст /say текст /leave")
+@dp.message(Command("say"))
+async def say(message: Message):
+    room = active_room(message.from_user.id)
+    if not room:
+        await message.answer("Сначала создай дело: /new")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Напиши сообщение: /say Я нашёл улику!")
+        return
+
+    con = db()
+    partner = con.execute(
+        "SELECT chat_id FROM members WHERE room_id = ? AND user_id != ?",
+        (room[0], message.from_user.id)
+    ).fetchone()
+    con.close()
+
+    if not partner:
+        await message.answer("Пока в комнате нет напарника.")
+        return
+
+    try:
+        await bot.send_message(
+            partner[0],
+            f"📨 Сообщение от напарника:\n{args[1]}"
+        )
+        await message.answer("Сообщение отправлено!")
+    except Exception:
+        await message.answer(
+            "Не получилось отправить сообщение. Напарник должен сначала нажать /start у бота."
+        )
+
+
+@dp.message(Command("level"))
+async def level(message: Message):
+    con = db()
+    result = con.execute(
+        "SELECT SUM(xp) FROM members WHERE user_id = ?",
+        (message.from_user.id,)
+    ).fetchone()
+    con.close()
+
+    xp = result[0] or 0
+    lvl = xp // 100 + 1
+
+    await message.answer(
+        f"🏆 Твой опыт: {xp} XP\n"
+        f"⭐ Уровень сыщика: {lvl}"
+    )
+
+
+@dp.message(Command("rules"))
+async def rules(message: Message):
+    await message.answer(
+        "📜 **Правила:**\n\n"
+        "1. Создай комнату через /new.\n"
+        "2. Пригласи друга командой /join КОД.\n"
+        "3. Изучайте улики через /clue.\n"
+        "4. Допрашивайте подозреваемых.\n"
+        "5. Обсуждайте версии через /say.\n"
+        "6. Когда будете уверены — обвиняйте преступника.\n\n"
+        "За расследования начисляется XP!"
+    )
+
 
 async def main():
- await init_db()
- async with Bot(TOKEN) as bot:
-  await dp.start_polling(bot)
+    init_db()
+    print("Detective bot started")
+    await dp.start_polling(bot)
 
-if __name__=="__main__": asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
