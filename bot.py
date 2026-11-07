@@ -435,5 +435,136 @@ async def main():
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__":
+# ===== ТАЙНОЕ ГОЛОСОВАНИЕ =====
+
+@dp.message(Command("vote"))
+async def start_vote(message: Message):
+    room = active_room(message.from_user.id)
+
+    if not room:
+        await message.answer("Сначала создайте расследование через /new")
+        return
+
+    room_id, code, case_key, index = room
+    case = CASES[case_key]
+
+    con = db()    con.execute("""
+        CREATE TABLE IF NOT EXISTS detective_vote_results (
+            room_id INTEGER PRIMARY KEY
+        )
+    """)
+    con.commit()
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS detective_votes (
+            room_id INTEGER,
+            user_id INTEGER,
+            suspect TEXT,
+            PRIMARY KEY (room_id, user_id)
+        )
+    """)
+    con.commit()
+    con.close()
+
+    builder = InlineKeyboardBuilder()
+
+    for suspect in case["suspects"]:
+        builder.button(
+            text="🕵️ " + suspect.title(),
+            callback_data=f"vote:{room_id}:{suspect}"
+        )
+
+    builder.adjust(1)
+
+    await message.answer(
+        "🗳 ТАЙНОЕ ГОЛОСОВАНИЕ\n\n"
+        "Кто, по-твоему, виновен?\n"
+        "Выбери подозреваемого. Твой выбор не увидит напарник.",
+        reply_markup=builder.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("vote:"))
+async def process_vote(callback: CallbackQuery):
+    _, room_id, suspect = callback.data.split(":", 2)
+    room_id = int(room_id)
+
+    con = db()    finished = con.execute(
+        "SELECT 1 FROM detective_vote_results WHERE room_id = ?",
+        (room_id,)
+    ).fetchone()
+
+    if finished:
+        con.close()
+        await callback.answer("Голосование уже завершено!", show_alert=True)
+        return
+
+    member = con.execute(
+        "SELECT 1 FROM members WHERE room_id = ? AND user_id = ?",
+        (room_id, callback.from_user.id)
+    ).fetchone()
+
+    if not member:
+        con.close()
+        await callback.answer("Ты не участник этого расследования!", show_alert=True)
+        return
+
+    con.execute("""
+        INSERT INTO detective_votes (room_id, user_id, suspect)
+        VALUES (?, ?, ?)
+        ON CONFLICT(room_id, user_id)
+        DO UPDATE SET suspect = excluded.suspect
+    """, (room_id, callback.from_user.id, suspect))
+
+    votes = con.execute(
+        "SELECT user_id, suspect FROM detective_votes WHERE room_id = ?",
+        (room_id,)
+    ).fetchall()
+
+    con.commit()
+    con.close()
+
+    await callback.answer("Твой голос принят!")
+
+    if len(votes) < 2:
+        return
+
+    con = db()
+    case_row = con.execute(
+        "SELECT case_key FROM rooms WHERE id = ?",
+        (room_id,)
+    ).fetchone()
+    con.close()
+
+    if not case_row:
+        return
+    con = db()
+    inserted = con.execute(
+    "INSERT OR IGNORE INTO detective_vote_results (room_id) VALUES (?)",
+    (room_id,)
+    ).rowcount
+    con.commit()
+    con.close()
+
+    if inserted == 0:
+    await callback.answer("Голосование уже завершено!", show_alert=True)
+    return
+    culprit = CASES[case_row[0]]["culprit"]
+
+    correct = sum(1 for _, choice in votes if choice == culprit)
+
+    result = (
+        "🎬 ИТОГИ ГОЛОСОВАНИЯ\n\n"
+        + "\n".join(
+            f"Сыщик {i + 1}: {choice.title()}"
+            for i, (_, choice) in enumerate(votes)
+        )
+        + f"\n\n🔎 Настоящий преступник: {culprit.title()}"
+        + f"\n\nПравильных голосов: {correct} из 2."
+    )
+
+    for user_id, choice in votes:
+        if choice == culprit:
+            add_xp(user_id, room_id, 50)
+
+    await callback.message.answer(result) if __name__ == "__main__":
     asyncio.run(main())
